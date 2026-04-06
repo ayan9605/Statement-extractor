@@ -14,6 +14,16 @@ const upload = multer({
     limits: { fileSize: 100 * 1024 * 1024 } // Up to 100MB
 });
 
+// ==========================================
+// NEW: Serve the HTML Frontend UI
+// ==========================================
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+// ==========================================
+// API Endpoint: Process the PDF
+// ==========================================
 app.post('/api/convert', upload.single('statement'), (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No PDF uploaded.' });
