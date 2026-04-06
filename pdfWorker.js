@@ -8,47 +8,30 @@ async function processPDF() {
         const { pdfPath, outputPath } = workerData;
         const dataBuffer = fs.readFileSync(pdfPath);
 
-        // 1. Extract Text
         const pdfData = await pdfParse(dataBuffer);
         const rawText = pdfData.text;
         const rows = rawText.split('\n').filter(line => line.trim() !== '');
 
-        // 2. Build Excel File Structure
         const workbook = new ExcelJS.Workbook();
         const worksheet = workbook.addWorksheet('Transactions');
 
+        // 1. Exact 5-Column Layout Matching Your Goal
         worksheet.columns = [
             { header: 'Date', key: 'date', width: 15 },
-            { header: 'Type', key: 'type', width: 10 },
-            { header: 'Transaction Details', key: 'desc', width: 70 },
-            { header: 'Debit', key: 'debit', width: 15 },
-            { header: 'Credit', key: 'credit', width: 15 },
-            { header: 'Balance', key: 'balance', width: 15 }
+            { header: 'Description', key: 'desc', width: 85 },
+            { header: 'Debit', key: 'debit', width: 18 },
+            { header: 'Credit', key: 'credit', width: 18 },
+            { header: 'Balance', key: 'balance', width: 18 }
         ];
         
         worksheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
         worksheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF007BFF' } };
 
-        // 3. Find the Opening Balance mathematically from the summary section
-        let previousBalance = null;
-        for (let r of rows) {
-            // Looks for the summary line (e.g., "₹15,000₹130₹0₹5,120₹10,010")
-            if (r.includes('₹') && r.split('₹').length >= 4) {
-                const parts = r.split('₹');
-                const possibleBalance = parseFloat(parts[1].replace(/,/g, ''));
-                if (!isNaN(possibleBalance)) {
-                    previousBalance = possibleBalance;
-                    break;
-                }
-            }
-        }
-
-        // 4. Ultra-Defensive Parsing Logic
         let tableStarted = false;
         let currentTxn = null;
         
-        const dateRegex = /^(\d{2}\s[A-Za-z]{3}\s'?\d{2})(.*)/; 
-        const amountRegex = /₹([\d,]+\.?\d*)/g;
+        const dateRegex = /^(\d{2}\s[A-Za-z]{3}\s'\d{2})(.*)/; 
+        const amountRegex = /₹([\d,]+(?:\.\d+)?)/g;
 
         for (let i = 0; i < rows.length; i++) {
             let line = rows[i].trim();
@@ -69,7 +52,6 @@ async function processPDF() {
 
                 currentTxn = {
                     date: dateMatch[1],
-                    type: '',
                     desc: dateMatch[2], 
                     debit: '',
                     credit: '',
@@ -85,42 +67,22 @@ async function processPDF() {
                     const txnAmount = parseFloat(amounts[0][1].replace(/,/g, ''));
                     currentTxn.balance = parseFloat(amounts[amounts.length - 1][1].replace(/,/g, '')); 
 
-                    // ==========================================
-                    // NEW: Math-Based Debit/Credit Routing
-                    // ==========================================
-                    if (previousBalance !== null) {
-                        if (currentTxn.balance > previousBalance) {
-                            currentTxn.type = 'Credit';
-                            currentTxn.credit = txnAmount;
-                        } else if (currentTxn.balance < previousBalance) {
-                            currentTxn.type = 'Debit';
-                            currentTxn.debit = txnAmount;
-                        } else {
-                            // Fallback if balance didn't change
-                            currentTxn.type = currentTxn.desc.toUpperCase().includes('DEBIT') ? 'Debit' : 'Credit';
-                            if (currentTxn.type === 'Debit') currentTxn.debit = txnAmount;
-                            else currentTxn.credit = txnAmount;
-                        }
-                    } else {
-                        // Absolute fallback if opening balance wasn't found
-                        currentTxn.type = currentTxn.desc.toUpperCase().includes('DEBIT') ? 'Debit' : 'Credit';
-                        if (currentTxn.type === 'Debit') currentTxn.debit = txnAmount;
-                        else currentTxn.credit = txnAmount;
-                    }
-                    
-                    // Set the current balance as the previous balance for the next row
-                    previousBalance = currentTxn.balance;
-
-                    // ==========================================
-                    // NEW: Smart Delimiter Cleanup
-                    // ==========================================
-                    let cleanDesc = currentTxn.desc;
-                    // Replace '3' only if it connects letters/numbers, but leaves numbers connected to numbers alone
-                    cleanDesc = cleanDesc.replace(/([a-zA-Z])3([a-zA-Z0-9])/g, '$1 $2');
-                    cleanDesc = cleanDesc.replace(/([0-9])3([a-zA-Z])/g, '$1 $2');
-                    cleanDesc = cleanDesc.replace(/3$/g, ''); // Clear trailing 3
-                    
+                    // 2. Precision Text Cleaning
+                    // Safely removes the '3' delimiter only if it touches a letter, protecting your reference numbers.
+                    let cleanDesc = currentTxn.desc.replace(/(?<=[a-zA-Z])3|3(?=[a-zA-Z])/g, ' ');
                     currentTxn.desc = cleanDesc.replace(/\s+/g, ' ').trim();
+
+                    // 3. Keyword-First Debit/Credit Routing
+                    // Checks the very first 25 characters of the description for the transaction type
+                    const firstWords = currentTxn.desc.substring(0, 25).toUpperCase();
+                    if (firstWords.includes('CREDIT') || firstWords.includes('REVERSAL')) {
+                        currentTxn.credit = txnAmount;
+                    } else if (firstWords.includes('DEBIT')) {
+                        currentTxn.debit = txnAmount;
+                    } else {
+                        // Fallback
+                        currentTxn.debit = txnAmount; 
+                    }
 
                     worksheet.addRow(currentTxn);
                     currentTxn = null; 
@@ -133,6 +95,20 @@ async function processPDF() {
         if (currentTxn && currentTxn.date && (currentTxn.debit || currentTxn.credit)) {
             worksheet.addRow(currentTxn);
         }
+
+        // 4. Excel Native Number Formatting
+        // This forces Excel to treat the columns as real currency/accounting numbers, not just raw text.
+        worksheet.eachRow((row, rowNumber) => {
+            if (rowNumber > 1) { // Skip header row
+                const debitCell = row.getCell('debit');
+                const creditCell = row.getCell('credit');
+                const balanceCell = row.getCell('balance');
+                
+                if (debitCell.value) debitCell.numFmt = '#,##0.00';
+                if (creditCell.value) creditCell.numFmt = '#,##0.00';
+                if (balanceCell.value) balanceCell.numFmt = '#,##0.00';
+            }
+        });
 
         await workbook.xlsx.writeFile(outputPath);
         parentPort.postMessage({ success: true, outputPath });
