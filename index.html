@@ -84,7 +84,7 @@
         statusText.innerText = "Extracting data...";
 
         try {
-            const response = await fetch('http://localhost:3000/api/convert', {
+            const response = await fetch('https://bank-statement-extractor-lwvc.onrender.com/api/convert', {
                 method: 'POST',
                 body: formData
             });
